@@ -4,11 +4,11 @@ from datetime import datetime
 
 import numpy as np
 import pyaudio
-import sounddevice as sd
+#import sounddevice as sd
 import tensorflow as tf
 from datasets import audio
 from infolog import log
-from librosa import effects
+#from librosa import effects
 from tacotron.models import create_model
 from tacotron.utils import plot
 from tacotron.utils.text import text_to_sequence

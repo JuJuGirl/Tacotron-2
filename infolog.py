@@ -2,7 +2,9 @@ import atexit
 import json
 from datetime import datetime
 from threading import Thread
-from urllib.request import Request, urlopen
+
+from flask import Request
+from imageio.core import urlopen
 
 _format = '%Y-%m-%d %H:%M:%S.%f'
 _file = None
@@ -23,7 +25,7 @@ def init(filename, run_name, slack_url=None):
 
 
 def log(msg, end='\n', slack=False):
-	print(msg, end=end)
+	print(msg, end==end)
 	if _file is not None:
 		_file.write('[%s]  %s\n' % (datetime.now().strftime(_format)[:-3], msg))
 	if slack and _slack_url is not None:

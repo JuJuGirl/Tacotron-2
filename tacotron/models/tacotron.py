@@ -1,14 +1,10 @@
-import tensorflow as tf 
-from tacotron.utils.symbols import symbols
-from infolog import log
-from tacotron.models.helpers import TacoTrainingHelper, TacoTestHelper
-from tacotron.models.modules import *
-from tensorflow.contrib.seq2seq import dynamic_decode
-from tacotron.models.Architecture_wrappers import TacotronEncoderCell, TacotronDecoderCell
-from tacotron.models.custom_decoder import CustomDecoder
-from tacotron.models.attention import LocationSensitiveAttention
+import tensorflow as tf
 
+import tacotron
+from infolog import log
+from tensorflow.contrib.seq2seq import dynamic_decode
 import numpy as np
+
 
 def split_func(x, split_pos):
 	rst = []
@@ -110,12 +106,16 @@ class Tacotron():
 					post_condition = hp.predict_linear and not gta
 
 					# Embeddings ==> [batch_size, sequence_length, embedding_dim]
+					from tacotron.utils.symbols import symbols
 					self.embedding_table = tf.get_variable(
 						'inputs_embedding', [len(symbols), hp.embedding_dim], dtype=tf.float32)
 					embedded_inputs = tf.nn.embedding_lookup(self.embedding_table, tower_inputs[i])
 
 
 					#Encoder Cell ==> [batch_size, encoder_steps, encoder_lstm_units]
+					from tacotron.models.Architecture_wrappers import TacotronEncoderCell
+					from tacotron.models.modules import EncoderConvolutions
+					from tacotron.models.modules import EncoderRNN
 					encoder_cell = TacotronEncoderCell(
 						EncoderConvolutions(is_training, hparams=hp, scope='encoder_convolutions'),
 						EncoderRNN(is_training, size=hp.encoder_lstm_units,
@@ -129,21 +129,27 @@ class Tacotron():
 
 					#Decoder Parts
 					#Attention Decoder Prenet
+					from tacotron.models.modules import Prenet
 					prenet = Prenet(is_training, layers_sizes=hp.prenet_layers, drop_rate=hp.tacotron_dropout_rate, scope='decoder_prenet')
 					#Attention Mechanism
+					from tacotron.models.attention import LocationSensitiveAttention
 					attention_mechanism = LocationSensitiveAttention(hp.attention_dim, encoder_outputs, hparams=hp, is_training=is_training,
 						mask_encoder=hp.mask_encoder, memory_sequence_length=tf.reshape(tower_input_lengths[i], [-1]), smoothing=hp.smoothing,
 						cumulate_weights=hp.cumulative_weights)
 					#Decoder LSTM Cells
+					from tacotron.models.modules import DecoderRNN
 					decoder_lstm = DecoderRNN(is_training, layers=hp.decoder_layers,
 						size=hp.decoder_lstm_units, zoneout=hp.tacotron_zoneout_rate, scope='decoder_LSTM')
 					#Frames Projection layer
+					from tacotron.models.modules import FrameProjection
 					frame_projection = FrameProjection(hp.num_mels * hp.outputs_per_step, scope='linear_transform_projection')
 					#<stop_token> projection layer
+					from tacotron.models.modules import StopProjection
 					stop_projection = StopProjection(is_training or is_evaluating, shape=hp.outputs_per_step, scope='stop_token_projection')
 
 
 					#Decoder Cell ==> [batch_size, decoder_steps, num_mels * r] (after decoding)
+					from tacotron.models.Architecture_wrappers import TacotronDecoderCell
 					decoder_cell = TacotronDecoderCell(
 						prenet,
 						attention_mechanism,
@@ -154,8 +160,10 @@ class Tacotron():
 
 					#Define the helper for our decoder
 					if is_training or is_evaluating or gta:
+						from tacotron.models.helpers import TacoTrainingHelper
 						self.helper = TacoTrainingHelper(batch_size, tower_mel_targets[i], hp, gta, is_evaluating, global_step)
 					else:
+						from tacotron.models.helpers import TacoTestHelper
 						self.helper = TacoTestHelper(batch_size, hp)
 
 
@@ -166,6 +174,7 @@ class Tacotron():
 					max_iters = hp.max_iters if not (is_training or is_evaluating) else None
 
 					#Decode
+					from tacotron.models.custom_decoder import CustomDecoder
 					(frames_prediction, stop_token_prediction, _), final_decoder_state, _ = dynamic_decode(
 						CustomDecoder(decoder_cell, self.helper, decoder_init_state),
 						impute_finished=False,
@@ -182,6 +191,7 @@ class Tacotron():
 							decoder_output = tf.minimum(tf.maximum(decoder_output, T2_output_range[0] - hp.lower_bound_decay), T2_output_range[1])
 
 					#Postnet
+					from tacotron.models.modules import Postnet
 					postnet = Postnet(is_training, hparams=hp, scope='postnet_convolutions')
 
 					#Compute residual using post-net ==> [batch_size, decoder_steps * r, postnet_channels]
@@ -202,6 +212,7 @@ class Tacotron():
 
 					if post_condition:
 						# Add post-processing CBHG. This does a great job at extracting features from mels before projection to Linear specs.
+						from tacotron.models.modules import CBHG
 						post_cbhg = CBHG(hp.cbhg_kernels, hp.cbhg_conv_channels, hp.cbhg_pool_size, [hp.cbhg_projection, hp.num_mels],
 							hp.cbhg_projection_kernel_size, hp.cbhg_highwaynet_layers, 
 							hp.cbhg_highway_units, hp.cbhg_rnn_units, hp.batch_norm_position, is_training, name='CBHG_postnet')
@@ -295,17 +306,20 @@ class Tacotron():
 				with tf.variable_scope('loss') as scope:
 					if hp.mask_decoder:
 						# Compute loss of predictions before postnet
+						from tacotron.models.modules import MaskedMSE
 						before = MaskedMSE(self.tower_mel_targets[i], self.tower_decoder_output[i], self.tower_targets_lengths[i],
 							hparams=self._hparams)
 						# Compute loss after postnet
 						after = MaskedMSE(self.tower_mel_targets[i], self.tower_mel_outputs[i], self.tower_targets_lengths[i],
 							hparams=self._hparams)
 						#Compute <stop_token> loss (for learning dynamic generation stop)
+						from tacotron.models.modules import MaskedSigmoidCrossEntropy
 						stop_token_loss = MaskedSigmoidCrossEntropy(self.tower_stop_token_targets[i],
 							self.tower_stop_token_prediction[i], self.tower_targets_lengths[i], hparams=self._hparams)
 						#Compute masked linear loss
 						if hp.predict_linear:
 							#Compute Linear L1 mask loss (priority to low frequencies)
+							from tacotron.models.modules import MaskedLinearLoss
 							linear_loss = MaskedLinearLoss(self.tower_linear_targets[i], self.tower_linear_outputs[i],
 								self.targets_lengths, hparams=self._hparams)
 						else:
